@@ -454,26 +454,47 @@ looks valid, the corruption only becomes visible when comparing across time.
 
 **Physical cause:**
 A supplier's ERP system is reconfigured to include GST (18%) in the
-unit price after a tax compliance update. The PhantomProof pipeline
-expects ex-GST prices. Revenue calculations are now 18% inflated
-for all products from that supplier.
+unit price after a tax compliance update. The integration layer maps
+the same 1.18 multiplier meant for price onto the `units_sold` field
+instead, since the event table carries no standalone price/revenue
+column (a mapping layer bug rather than a clean price correction).
+Revenue calculations downstream are inflated 18% for all products from
+that supplier, but the inflation lives in reported quantity, not price.
 
 **Data symptom:**
 ```
-Baseline:  revenue = units_sold × base_price = 100 × 249 = 24,900
-Corrupted: revenue = 24,900 × 1.18 = 29,382   (GST included)
+Baseline:  units_sold = 100
+Corrupted: units_sold = 118 (18% inflated, same multiplier meant for price)
 ```
-Historical trend lines show a sudden revenue jump that looks like
-genuine demand growth but is actually a pricing error.
+Historical trend lines show a sudden volume jump that looks like genuine
+demand growth but is actually an integration error. If revenue is later
+computed downstream as `units_sold × base_price`, aggregate revenue for
+these rows also appears 18% inflated, but this is a side effect of the
+quantity error, not an independent price error.
 
 **Targeting logic:**
-Products from `SFTP_XML` suppliers (EDI schema drift is the mechanism).
-15% of their revenue rows multiplied by 1.18.
+`customer_fulfillment` events for products from `SFTP_XML` suppliers
+(EDI schema drift is the mechanism). 15% of those rows have `units_sold`
+multiplied by 1.18.
 
 **Detection signal:**
-Revenue per unit for affected products shows a step-change increase
-after a specific date. Cross-reference against `base_price` in dim_product.
+Revenue-per-unit (`revenue / units_sold`) is **not** a usable signal here —
+since both revenue and units_sold scale by the same 1.18 factor together,
+the ratio cancels out and stays equal to `base_price`, making this fault
+invisible to a per unit price check. Instead: an unexplained ~18%
+step-change in raw `units_sold` volume for SFTP_XML sourced products that
+does not correspond to any active `demand_spike_events` window is the
+actual detectable signature. Cross-reference affected dates against
+`config.yaml`'s `demand_spike_events` to rule out legitimate spikes.
 
+
+> **Note (2026-07-15):** original spec described this as a price/revenue
+> corruption; the actual implementation inflates `units_sold` directly,
+> since the event table has no price column. Detection signal below
+> reflects the implementation, not the original design. See commit
+> `docs(chaos_library): correct GST Math Drift...` for full reasoning.
+> Deferred: add a `line_revenue` column upstream if this needs to match
+> the original design exactly.
 ---
 
 ### 4.2 SKU Migration: Identity Crisis
